@@ -1,0 +1,220 @@
+package com.gnaupitni
+
+import android.content.Context
+import android.util.Log
+import androidx.work.BackoffPolicy
+import androidx.work.CoroutineWorker
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import androidx.work.workDataOf
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.TimeUnit
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+
+object Parser {
+    private val rp = Regex("(?i)(?:rp\\.?|idr)\\s*([0-9][0-9.,]*)")
+    private val decimalTail = Regex("[.,]\\d{1,2}$")
+
+    /** Ambil nominal pertama setelah "Rp" / "IDR". Contoh: "Rp 150.123,00" -> 150123 */
+    fun parseAmount(text: String): Long? {
+        val m = rp.find(text) ?: return null
+        var s = m.groupValues[1].trimEnd('.', ',')
+        s = decimalTail.replace(s, "")
+        s = s.replace(".", "").replace(",", "")
+        return s.toLongOrNull()
+    }
+
+    /** digits = 0 -> semua digit nominal; selain itu N digit terakhir. */
+    fun uniqueCode(amount: Long, digits: Int): String {
+        val s = amount.toString()
+        return if (digits <= 0 || digits >= s.length) s else s.takeLast(digits)
+    }
+
+    fun matches(rule: Rule, text: String): Boolean {
+        val words = rule.keywords.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val bad = rule.excludeKeywords.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        if (bad.any { text.contains(it, ignoreCase = true) }) return false
+        if (words.isEmpty()) return true
+        return words.any { text.contains(it, ignoreCase = true) }
+    }
+
+    fun sender(rule: Rule, text: String): String {
+        if (rule.senderRegex.isBlank()) return ""
+        return try {
+            Regex(rule.senderRegex, RegexOption.IGNORE_CASE).find(text)?.groupValues?.getOrNull(1)?.trim() ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
+}
+
+object Dispatcher {
+    private val seen = HashMap<String, Long>()
+
+    private fun sha256(s: String): String =
+        MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    private fun esc(s: String): String {
+        val q = JSONObject.quote(s)
+        return q.substring(1, q.length - 1)
+    }
+
+    fun fill(template: String, values: Map<String, String>): String {
+        var out = template
+        for ((k, v) in values) out = out.replace("{{$k}}", esc(v))
+        return out
+    }
+
+    private fun isoNow(t: Long): String =
+        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(Date(t))
+
+    private fun duplicate(key: String): Boolean = synchronized(seen) {
+        val now = System.currentTimeMillis()
+        seen.entries.removeAll { now - it.value > 10 * 60 * 1000L }
+        if (seen.containsKey(key)) return true
+        seen[key] = now
+        false
+    }
+
+    fun handle(ctx: Context, pkg: String, title: String, text: String, time: Long) {
+        for (rule in Store.rules.toList()) {
+            if (!rule.enabled || rule.pkg != pkg) continue
+            if (!Parser.matches(rule, text)) continue
+            val amount = Parser.parseAmount(text)
+            if (amount == null) {
+                Store.log("${rule.name}: nominal tidak terbaca", false)
+                continue
+            }
+            val hash = sha256("$pkg|$time|$text").take(32)
+            if (duplicate(rule.id + "|" + sha256("$pkg|$text"))) continue
+
+            val values = mapOf(
+                "bank" to rule.name,
+                "amount" to amount.toString(),
+                "unique_code" to Parser.uniqueCode(amount, rule.digits),
+                "sender" to Parser.sender(rule, text),
+                "time" to isoNow(time),
+                "package" to pkg,
+                "raw_text" to text,
+                "title" to title,
+                "hash" to hash,
+            )
+            for (destId in rule.destIds) {
+                val dest = Store.destinations.find { it.id == destId } ?: continue
+                enqueue(ctx, dest, fill(dest.template, values), "${rule.name} → ${dest.name}", hash)
+            }
+        }
+    }
+
+    fun sendTest(ctx: Context, dest: Destination) {
+        val now = System.currentTimeMillis()
+        val hash = UUID.randomUUID().toString().replace("-", "")
+        val values = mapOf(
+            "bank" to "TES",
+            "amount" to "150123",
+            "unique_code" to "123",
+            "sender" to "Tes Intipuang",
+            "time" to isoNow(now),
+            "package" to "com.gnaupitni.test",
+            "raw_text" to "Tes: kamu menerima Rp 150.123 dari Tes Intipuang",
+            "title" to "Tes",
+            "hash" to hash,
+        )
+        enqueue(ctx, dest, fill(dest.template, values), "TES → ${dest.name}", hash)
+    }
+
+    private fun enqueue(ctx: Context, dest: Destination, body: String, label: String, hash: String) {
+        val req = OneTimeWorkRequestBuilder<SendWorker>()
+            .setInputData(workDataOf("dest" to dest.id, "body" to body, "label" to label))
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .build()
+        WorkManager.getInstance(ctx.applicationContext)
+            .enqueueUniqueWork("$hash-${dest.id}", ExistingWorkPolicy.KEEP, req)
+    }
+}
+
+class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+
+    private fun hmac(secret: String, msg: String): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(secret.toByteArray(), "HmacSHA256"))
+        return mac.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
+    }
+
+    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        Store.init(applicationContext)
+        val label = inputData.getString("label") ?: "?"
+        val body = inputData.getString("body") ?: return@withContext Result.failure()
+        val dest = Store.destinations.find { it.id == inputData.getString("dest") }
+        if (dest == null) {
+            Store.log("$label: tujuan sudah dihapus", false)
+            return@withContext Result.failure()
+        }
+        if (!dest.url.startsWith("https://")) {
+            Store.log("$label: URL harus diawali https://", false)
+            return@withContext Result.failure()
+        }
+        try {
+            val conn = URL(dest.url).openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            dest.headers.lines().forEach { line ->
+                val i = line.indexOf(':')
+                if (i > 0) conn.setRequestProperty(line.substring(0, i).trim(), line.substring(i + 1).trim())
+            }
+            if (dest.secret.isNotBlank()) {
+                val ts = (System.currentTimeMillis() / 1000).toString()
+                conn.setRequestProperty("X-Timestamp", ts)
+                conn.setRequestProperty("X-Signature", hmac(dest.secret, "$ts.$body"))
+            }
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            val code = conn.responseCode
+            conn.disconnect()
+            when {
+                code in 200..299 -> {
+                    Store.log("$label: terkirim ($code)", true)
+                    Result.success()
+                }
+                code in 400..499 && code != 408 && code != 429 -> {
+                    Store.log("$label: ditolak server ($code)", false)
+                    Result.failure()
+                }
+                runAttemptCount >= 6 -> {
+                    Store.log("$label: gagal ($code), berhenti mencoba", false)
+                    Result.failure()
+                }
+                else -> {
+                    Store.log("$label: gagal ($code), coba lagi", false)
+                    Result.retry()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("Gnaupitni", "send error", e)
+            if (runAttemptCount >= 6) {
+                Store.log("$label: error ${e.javaClass.simpleName}, berhenti mencoba", false)
+                Result.failure()
+            } else {
+                Store.log("$label: error ${e.javaClass.simpleName}, coba lagi", false)
+                Result.retry()
+            }
+        }
+    }
+}
