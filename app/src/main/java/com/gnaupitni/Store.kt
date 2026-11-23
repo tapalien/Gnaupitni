@@ -58,7 +58,7 @@ object Store {
         private set
 
     @Synchronized
-    fun setIntipMode(m: Int) {
+    fun changeIntipMode(m: Int) {
         intipMode = m
         sp?.edit()?.putInt("intipMode", m)?.apply()
         if (m == 2) recent.clear()

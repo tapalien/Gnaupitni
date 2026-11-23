@@ -705,9 +705,9 @@ fun IntipScreen(onUse: (Seen) -> Unit) {
         )
         Spacer(Modifier.height(8.dp))
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Rekam semua", selected = Store.intipMode == 0) { Store.setIntipMode(0) }
-            Chip("Hanya ada nominal", selected = Store.intipMode == 1) { Store.setIntipMode(1) }
-            Chip("Jangan rekam", selected = Store.intipMode == 2) { Store.setIntipMode(2) }
+            Chip("Rekam semua", selected = Store.intipMode == 0) { Store.changeIntipMode(0) }
+            Chip("Hanya ada nominal", selected = Store.intipMode == 1) { Store.changeIntipMode(1) }
+            Chip("Jangan rekam", selected = Store.intipMode == 2) { Store.changeIntipMode(2) }
         }
         if (Store.recent.isEmpty()) {
             EmptyState(
