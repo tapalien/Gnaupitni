@@ -2,10 +2,18 @@ package com.gnaupitni
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.setValue
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+
+const val TEMPLATE_TOKEN =
+    "{\"bank\":\"{{bank}}\",\"amount\":{{amount}},\"unique_code\":\"{{unique_code}}\"," +
+        "\"sender\":\"{{sender}}\",\"time\":\"{{time}}\",\"package\":\"{{package}}\"," +
+        "\"raw_text\":\"{{raw_text}}\",\"hash\":\"{{hash}}\",\"token\":\"{{secret}}\"}"
 
 const val DEFAULT_TEMPLATE =
     "{\"bank\":\"{{bank}}\",\"amount\":{{amount}},\"unique_code\":\"{{unique_code}}\"," +
@@ -45,11 +53,23 @@ object Store {
     val logs = mutableStateListOf<LogItem>()
     val recent = mutableStateListOf<Seen>()
 
+    /** 0 = rekam semua, 1 = hanya yang ada nominal Rp/IDR, 2 = jangan rekam */
+    var intipMode by mutableIntStateOf(0)
+        private set
+
+    @Synchronized
+    fun setIntipMode(m: Int) {
+        intipMode = m
+        sp?.edit()?.putInt("intipMode", m)?.apply()
+        if (m == 2) recent.clear()
+    }
+
     @Synchronized
     fun init(ctx: Context) {
         if (sp != null) return
         val p = ctx.applicationContext.getSharedPreferences("gnaupitni", Context.MODE_PRIVATE)
         sp = p
+        intipMode = p.getInt("intipMode", 0)
         runCatching { parseDest(JSONArray(p.getString("dest", "[]"))) }
         runCatching { parseRules(JSONArray(p.getString("rules", "[]"))) }
         runCatching {

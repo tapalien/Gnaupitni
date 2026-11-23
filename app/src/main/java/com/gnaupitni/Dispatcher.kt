@@ -148,7 +148,7 @@ object Dispatcher {
                     continue
                 }
                 Store.log("${rule.name}: Rp $amount terbaca, mengirim ke ${dest.name}", true)
-                enqueue(ctx, dest, fill(dest.template, values), "${rule.name} Rp $amount → ${dest.name}", hash)
+                enqueue(ctx, dest, fill(dest.template, values + ("secret" to dest.secret)), "${rule.name} Rp $amount → ${dest.name}", hash)
             }
         }
     }
@@ -167,7 +167,7 @@ object Dispatcher {
             "title" to "Tes",
             "hash" to hash,
         )
-        enqueue(ctx, dest, fill(dest.template, values), "TES → ${dest.name}", hash)
+        enqueue(ctx, dest, fill(dest.template, values + ("secret" to dest.secret)), "TES → ${dest.name}", hash)
     }
 
     private fun enqueue(ctx: Context, dest: Destination, body: String, label: String, hash: String) {

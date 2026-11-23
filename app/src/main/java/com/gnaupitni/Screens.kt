@@ -542,7 +542,7 @@ private const val TEMPLATE_RINGKAS =
     "{\"amount\":{{amount}},\"unique_code\":\"{{unique_code}}\",\"bank\":\"{{bank}}\",\"hash\":\"{{hash}}\"}"
 
 private val PLACEHOLDERS = listOf(
-    "bank", "amount", "unique_code", "sender", "time", "package", "title", "raw_text", "hash",
+    "bank", "amount", "unique_code", "sender", "time", "package", "title", "raw_text", "hash", "secret",
 )
 
 @Composable
@@ -669,6 +669,7 @@ private fun DestEditor(initial: Destination, onSave: (Destination) -> Unit, onCl
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Chip("Lengkap", selected = template == DEFAULT_TEMPLATE) { template = DEFAULT_TEMPLATE }
             Chip("Ringkas", selected = template == TEMPLATE_RINGKAS) { template = TEMPLATE_RINGKAS }
+            Chip("Dengan token", selected = template == TEMPLATE_TOKEN) { template = TEMPLATE_TOKEN }
         }
         OutlinedTextField(
             template, { template = it },
@@ -698,10 +699,16 @@ fun IntipScreen(onUse: (Seen) -> Unit) {
             if (Store.recent.isNotEmpty()) TextButton(onClick = { Store.recent.clear() }) { Text("Bersihkan") }
         }
         Text(
-            "Hanya disimpan di memori dan hilang saat aplikasi ditutup.",
+            "Hanya disimpan di memori dan hilang saat aplikasi ditutup. Tidak pernah dikirim ke mana pun.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Rekam semua", selected = Store.intipMode == 0) { Store.setIntipMode(0) }
+            Chip("Hanya ada nominal", selected = Store.intipMode == 1) { Store.setIntipMode(1) }
+            Chip("Jangan rekam", selected = Store.intipMode == 2) { Store.setIntipMode(2) }
+        }
         if (Store.recent.isEmpty()) {
             EmptyState(
                 Icons.Filled.Search,

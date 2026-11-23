@@ -39,12 +39,15 @@ class NotifService : NotificationListenerService() {
             .joinToString(" | ")
         if (body.isBlank()) return
         val summary = n.flags and Notification.FLAG_GROUP_SUMMARY != 0
-        Store.addSeen(
-            Seen(
-                System.currentTimeMillis(), sbn.packageName,
-                if (summary) "[Ringkasan grup, tidak diproses]" else title, body,
-            ),
-        )
+        val mode = Store.intipMode
+        if (mode == 0 || (mode == 1 && Parser.parseAmount(body) != null)) {
+            Store.addSeen(
+                Seen(
+                    System.currentTimeMillis(), sbn.packageName,
+                    if (summary) "[Ringkasan grup, tidak diproses]" else title, body,
+                ),
+            )
+        }
         if (summary) return
         Dispatcher.handle(applicationContext, sbn.packageName, title, body, sbn.postTime)
     }
