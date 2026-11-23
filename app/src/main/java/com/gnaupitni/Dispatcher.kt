@@ -44,13 +44,15 @@ object Parser {
         return if (digits <= 0 || digits >= s.length) s else s.takeLast(digits)
     }
 
-    fun matches(rule: Rule, text: String): Boolean {
+    fun skipReason(rule: Rule, text: String): String? {
         val words = rule.keywords.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         val bad = rule.excludeKeywords.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-        if (bad.any { text.contains(it, ignoreCase = true) }) return false
-        if (words.isEmpty()) return true
-        return words.any { text.contains(it, ignoreCase = true) }
+        if (bad.any { text.contains(it, ignoreCase = true) }) return "kena kata pengecualian"
+        if (words.isNotEmpty() && words.none { text.contains(it, ignoreCase = true) }) return "kata kunci tidak cocok"
+        return null
     }
+
+    fun matches(rule: Rule, text: String): Boolean = skipReason(rule, text) == null
 
     fun sender(rule: Rule, text: String): String {
         if (rule.senderRegex.isBlank()) return ""
@@ -63,7 +65,6 @@ object Parser {
 }
 
 object Dispatcher {
-    private val seen = HashMap<String, Long>()
 
     private fun sha256(s: String): String =
         MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
@@ -82,26 +83,53 @@ object Dispatcher {
     private fun isoNow(t: Long): String =
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(Date(t))
 
-    private fun duplicate(key: String): Boolean = synchronized(seen) {
-        val now = System.currentTimeMillis()
-        seen.entries.removeAll { now - it.value > 10 * 60 * 1000L }
-        if (seen.containsKey(key)) return true
-        seen[key] = now
-        false
+    private val seenHash = LinkedHashSet<String>()
+    private val lastText = HashMap<String, Long>()
+
+    private fun duplicate(ruleId: String, hash: String, textKey: String): Boolean {
+        synchronized(this) {
+            val now = System.currentTimeMillis()
+            if (!seenHash.add(ruleId + hash)) return true
+            if (seenHash.size > 300) seenHash.remove(seenHash.first())
+            if (lastText.size > 200) lastText.entries.removeAll { now - it.value > 300_000L }
+            val last = lastText[ruleId + textKey]
+            lastText[ruleId + textKey] = now
+            return last != null && now - last < 20_000L
+        }
     }
 
     fun handle(ctx: Context, pkg: String, title: String, text: String, time: Long) {
-        for (rule in Store.rules.toList()) {
-            if (!rule.enabled || rule.pkg != pkg) continue
-            if (!Parser.matches(rule, text)) continue
+        val forPkg = Store.rules.toList().filter { it.pkg == pkg }
+        if (forPkg.isEmpty()) {
+            if (Parser.parseAmount(text) != null && !duplicate("norule", sha256("$pkg|$time|$text"), "$pkg|$text")) {
+                Store.log("Ada notifikasi uang dari $pkg, tapi belum ada aturan untuk aplikasi ini", false)
+            }
+            return
+        }
+        for (rule in forPkg) {
+            if (!rule.enabled) {
+                Store.log("${rule.name}: aturan sedang dimatikan, notifikasi dilewati", false)
+                continue
+            }
+            val why = Parser.skipReason(rule, text)
+            if (why != null) {
+                Store.log("${rule.name}: dilewati ($why)", false)
+                continue
+            }
             val amount = Parser.parseAmount(text)
             if (amount == null) {
-                Store.log("${rule.name}: nominal tidak terbaca", false)
+                Store.log("${rule.name}: dilewati (nominal tidak terbaca)", false)
                 continue
             }
             val hash = sha256("$pkg|$time|$text").take(32)
-            if (duplicate(rule.id + "|" + sha256("$pkg|$text"))) continue
-
+            if (duplicate(rule.id, hash, text)) {
+                Store.log("${rule.name}: dilewati (notifikasi yang sama baru saja diproses)", false)
+                continue
+            }
+            if (rule.destIds.isEmpty()) {
+                Store.log("${rule.name}: Rp ${amount} terbaca, tapi aturan belum punya tujuan", false)
+                continue
+            }
             val values = mapOf(
                 "bank" to rule.name,
                 "amount" to amount.toString(),
@@ -114,8 +142,13 @@ object Dispatcher {
                 "hash" to hash,
             )
             for (destId in rule.destIds) {
-                val dest = Store.destinations.find { it.id == destId } ?: continue
-                enqueue(ctx, dest, fill(dest.template, values), "${rule.name} → ${dest.name}", hash)
+                val dest = Store.destinations.find { it.id == destId }
+                if (dest == null) {
+                    Store.log("${rule.name}: tujuan sudah tidak ada", false)
+                    continue
+                }
+                Store.log("${rule.name}: Rp $amount terbaca, mengirim ke ${dest.name}", true)
+                enqueue(ctx, dest, fill(dest.template, values), "${rule.name} Rp $amount → ${dest.name}", hash)
             }
         }
     }

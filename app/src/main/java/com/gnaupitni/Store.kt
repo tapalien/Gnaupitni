@@ -35,52 +35,83 @@ data class Rule(
 
 data class LogItem(val time: Long, val text: String, val ok: Boolean)
 
+data class Seen(val time: Long, val pkg: String, val title: String, val text: String)
+
 object Store {
     private var sp: SharedPreferences? = null
 
     val destinations = mutableStateListOf<Destination>()
     val rules = mutableStateListOf<Rule>()
     val logs = mutableStateListOf<LogItem>()
+    val recent = mutableStateListOf<Seen>()
 
     @Synchronized
     fun init(ctx: Context) {
         if (sp != null) return
         val p = ctx.applicationContext.getSharedPreferences("gnaupitni", Context.MODE_PRIVATE)
         sp = p
-        runCatching {
-            val a = JSONArray(p.getString("dest", "[]"))
-            for (i in 0 until a.length()) {
-                val o = a.getJSONObject(i)
-                destinations.add(
-                    Destination(
-                        o.getString("id"), o.getString("name"), o.getString("url"),
-                        o.getString("secret"), o.getString("template"),
-                        o.optString("headers", ""),
-                    ),
-                )
-            }
-        }
-        runCatching {
-            val a = JSONArray(p.getString("rules", "[]"))
-            for (i in 0 until a.length()) {
-                val o = a.getJSONObject(i)
-                val ids = o.getJSONArray("destIds")
-                rules.add(
-                    Rule(
-                        o.getString("id"), o.getString("name"), o.getString("pkg"),
-                        o.getString("keywords"), o.optString("exclude", ""), o.getInt("digits"),
-                        o.getString("senderRegex"),
-                        List(ids.length()) { ids.getString(it) }, o.getBoolean("enabled"),
-                    ),
-                )
-            }
-        }
+        runCatching { parseDest(JSONArray(p.getString("dest", "[]"))) }
+        runCatching { parseRules(JSONArray(p.getString("rules", "[]"))) }
         runCatching {
             val a = JSONArray(p.getString("logs", "[]"))
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
                 logs.add(LogItem(o.getLong("t"), o.getString("x"), o.getBoolean("ok")))
             }
+        }
+    }
+
+    private fun parseDest(a: JSONArray) {
+        for (i in 0 until a.length()) {
+            val o = a.getJSONObject(i)
+            destinations.add(
+                Destination(
+                    o.getString("id"), o.getString("name"), o.getString("url"),
+                    o.getString("secret"), o.getString("template"),
+                    o.optString("headers", ""),
+                ),
+            )
+        }
+    }
+
+    private fun parseRules(a: JSONArray) {
+        for (i in 0 until a.length()) {
+            val o = a.getJSONObject(i)
+            val ids = o.getJSONArray("destIds")
+            rules.add(
+                Rule(
+                    o.getString("id"), o.getString("name"), o.getString("pkg"),
+                    o.getString("keywords"), o.optString("exclude", ""), o.getInt("digits"),
+                    o.getString("senderRegex"),
+                    List(ids.length()) { ids.getString(it) }, o.getBoolean("enabled"),
+                ),
+            )
+        }
+    }
+
+    @Synchronized
+    fun exportJson(): String = JSONObject()
+        .put("app", "intipuang")
+        .put("dest", JSONArray(sp?.getString("dest", "[]") ?: "[]"))
+        .put("rules", JSONArray(sp?.getString("rules", "[]") ?: "[]"))
+        .toString()
+
+    @Synchronized
+    fun importJson(text: String): Boolean {
+        return try {
+            val o = JSONObject(text)
+            if (o.optString("app") != "intipuang") return false
+            val d = o.getJSONArray("dest")
+            val r = o.getJSONArray("rules")
+            destinations.clear()
+            rules.clear()
+            parseDest(d)
+            parseRules(r)
+            saveDest()
+            saveRules()
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -120,6 +151,12 @@ object Store {
         logs.add(0, LogItem(System.currentTimeMillis(), text, ok))
         while (logs.size > 100) logs.removeAt(logs.size - 1)
         saveLogs()
+    }
+
+    @Synchronized
+    fun addSeen(s: Seen) {
+        recent.add(0, s)
+        while (recent.size > 40) recent.removeAt(recent.size - 1)
     }
 
     @Synchronized

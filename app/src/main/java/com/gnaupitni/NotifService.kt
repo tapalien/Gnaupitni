@@ -26,13 +26,26 @@ class NotifService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName == packageName) return
         val n = sbn.notification ?: return
-        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
         val e = n.extras ?: return
         val title = e.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
         val text = e.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
         val big = e.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().orEmpty()
-        val body = listOf(title, big.ifBlank { text }).filter { it.isNotBlank() }.joinToString(" | ")
+        val sub = e.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString().orEmpty()
+        val lines = e.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+            ?.joinToString(" ") { it.toString() }.orEmpty()
+        val body = listOf(title, big.ifBlank { text }, lines, sub)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" | ")
         if (body.isBlank()) return
+        val summary = n.flags and Notification.FLAG_GROUP_SUMMARY != 0
+        Store.addSeen(
+            Seen(
+                System.currentTimeMillis(), sbn.packageName,
+                if (summary) "[Ringkasan grup, tidak diproses]" else title, body,
+            ),
+        )
+        if (summary) return
         Dispatcher.handle(applicationContext, sbn.packageName, title, body, sbn.postTime)
     }
 }
