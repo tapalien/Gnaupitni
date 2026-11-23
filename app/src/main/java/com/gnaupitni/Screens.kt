@@ -54,6 +54,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import org.json.JSONObject
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -545,6 +546,20 @@ private val PLACEHOLDERS = listOf(
     "bank", "amount", "unique_code", "sender", "time", "package", "title", "raw_text", "hash", "secret",
 )
 
+private fun templateProblem(t: String): String? {
+    val sample = mapOf(
+        "bank" to "Gopay", "amount" to "150123", "unique_code" to "23", "sender" to "Tes",
+        "time" to "2026-01-01T00:00:00+07:00", "package" to "com.contoh", "title" to "Judul",
+        "raw_text" to "Rp 150.123", "hash" to "abc123", "secret" to "rahasia",
+    )
+    return try {
+        JSONObject(Dispatcher.fill(t, sample))
+        null
+    } catch (e: Exception) {
+        "JSON belum valid: " + (e.message ?: "periksa tanda kutip dan koma").take(80)
+    }
+}
+
 @Composable
 fun DestScreen() {
     val ctx = LocalContext.current
@@ -676,6 +691,16 @@ private fun DestEditor(initial: Destination, onSave: (Destination) -> Unit, onCl
             label = { Text("Template") },
             modifier = Modifier.fillMaxWidth(),
         )
+        val tplProblem = templateProblem(template)
+        if (tplProblem != null) {
+            Text(tplProblem, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        } else {
+            Text(
+                "JSON valid. Baris tetap seperti \"token\": \"abc\" boleh ditulis langsung di samping isian {{...}}.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Text(
             "Ketuk untuk menambahkan isian ke template:",
             style = MaterialTheme.typography.bodySmall,

@@ -181,6 +181,8 @@ object Dispatcher {
     }
 }
 
+private val REDIRECTS = setOf(301, 302, 303, 307, 308)
+
 class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
     private fun hmac(secret: String, msg: String): String {
@@ -203,39 +205,82 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             return@withContext Result.failure()
         }
         try {
-            val conn = URL(dest.url).openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 15000
-            conn.readTimeout = 15000
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
+            var cur = URL(dest.url).openConnection() as HttpURLConnection
+            cur.requestMethod = "POST"
+            cur.instanceFollowRedirects = false
+            cur.connectTimeout = 15000
+            cur.readTimeout = 15000
+            cur.doOutput = true
+            cur.setRequestProperty("Content-Type", "application/json")
             dest.headers.lines().forEach { line ->
                 val i = line.indexOf(':')
-                if (i > 0) conn.setRequestProperty(line.substring(0, i).trim(), line.substring(i + 1).trim())
+                if (i > 0) cur.setRequestProperty(line.substring(0, i).trim(), line.substring(i + 1).trim())
             }
             if (dest.secret.isNotBlank()) {
                 val ts = (System.currentTimeMillis() / 1000).toString()
-                conn.setRequestProperty("X-Timestamp", ts)
-                conn.setRequestProperty("X-Signature", hmac(dest.secret, "$ts.$body"))
+                cur.setRequestProperty("X-Timestamp", ts)
+                cur.setRequestProperty("X-Signature", hmac(dest.secret, "$ts.$body"))
             }
-            conn.outputStream.use { it.write(body.toByteArray()) }
-            val code = conn.responseCode
-            conn.disconnect()
+            cur.outputStream.use { it.write(body.toByteArray()) }
+            var code = cur.responseCode
+            // Ikuti redirect secara manual: selalu dengan GET tanpa body dan tanpa header rahasia,
+            // jadi POST asli tidak pernah dikirim ulang (Apps Script membalas POST lewat 302).
+            var hops = 0
+            while (code in REDIRECTS && hops < 4) {
+                val loc = cur.getHeaderField("Location")
+                cur.disconnect()
+                if (loc.isNullOrBlank()) break
+                val target = URL(cur.url, loc)
+                if (target.protocol != "https") break
+                val next = target.openConnection() as HttpURLConnection
+                next.requestMethod = "GET"
+                next.instanceFollowRedirects = false
+                next.connectTimeout = 15000
+                next.readTimeout = 15000
+                code = next.responseCode
+                cur = next
+                hops++
+            }
+            val text = try {
+                val st = if (code in 200..399) cur.inputStream else cur.errorStream
+                st?.bufferedReader()?.use { it.readText().take(4000) }.orEmpty()
+            } catch (e: Exception) {
+                ""
+            }
+            cur.disconnect()
+            val snippet = text.replace(Regex("\\s+"), " ").trim().take(150)
+            val tail = if (snippet.isBlank()) "" else " $snippet"
+            val rejected = Regex("\"ok\"\\s*:\\s*false").containsMatchIn(text)
+            val disabled = Regex("\"status\"\\s*:\\s*\"disabled\"").containsMatchIn(text)
+            val htmlFromScript = URL(dest.url).host.endsWith("google.com") &&
+                (text.trimStart().startsWith("<!DOCTYPE", true) || text.trimStart().startsWith("<html", true))
             when {
+                code in 200..299 && rejected -> {
+                    Store.log("$label: ditolak penerima ($code)$tail", false)
+                    Result.failure()
+                }
+                code in 200..299 && disabled -> {
+                    Store.log("$label: penerima sedang dimatikan, belum diproses ($code)$tail", false)
+                    Result.failure()
+                }
+                code in 200..299 && htmlFromScript -> {
+                    Store.log("$label: balasan berupa halaman web, bukan JSON. Cek akses deploy Apps Script ($code)", false)
+                    Result.failure()
+                }
                 code in 200..299 -> {
-                    Store.log("$label: terkirim ($code)", true)
+                    Store.log("$label: terkirim ($code)$tail", true)
                     Result.success()
                 }
                 code in 400..499 && code != 408 && code != 429 -> {
-                    Store.log("$label: ditolak server ($code)", false)
+                    Store.log("$label: ditolak server ($code)$tail", false)
                     Result.failure()
                 }
                 runAttemptCount >= 6 -> {
-                    Store.log("$label: gagal ($code), berhenti mencoba", false)
+                    Store.log("$label: gagal ($code), berhenti mencoba$tail", false)
                     Result.failure()
                 }
                 else -> {
-                    Store.log("$label: gagal ($code), coba lagi", false)
+                    Store.log("$label: gagal ($code), coba lagi$tail", false)
                     Result.retry()
                 }
             }
